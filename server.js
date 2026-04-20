@@ -1,28 +1,57 @@
 require('dotenv').config();
 const express = require('express');
 const { MongoClient } = require('mongodb');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Try Atlas first, fallback to local MongoDB
+// Try Atlas first, fallback to local MongoDB, then use JSON file storage
 const ATLAS_URI = process.env.MONGODB_URI;
 const LOCAL_URI = 'mongodb://127.0.0.1:27017';
 const MONGODB_DB = process.env.MONGODB_DB || 'morsecode';
+const JSON_DB_FILE = path.join(__dirname, 'reviews.json');
 
 let client;
 let db;
+let useJsonStorage = false;
+let reviews = [];
+
+// Load reviews from JSON file
+function loadReviewsFromFile() {
+  try {
+    if (fs.existsSync(JSON_DB_FILE)) {
+      const data = fs.readFileSync(JSON_DB_FILE, 'utf8');
+      reviews = JSON.parse(data);
+    } else {
+      reviews = [];
+    }
+  } catch (error) {
+    console.log('Error loading reviews from file:', error.message);
+    reviews = [];
+  }
+}
+
+// Save reviews to JSON file
+function saveReviewsToFile() {
+  try {
+    fs.writeFileSync(JSON_DB_FILE, JSON.stringify(reviews, null, 2), 'utf8');
+  } catch (error) {
+    console.error('Error saving reviews to file:', error);
+  }
+}
 
 async function connectToMongoDB() {
   // Try Atlas first
   if (ATLAS_URI) {
     try {
       console.log('Attempting to connect to MongoDB Atlas...');
-      client = new MongoClient(ATLAS_URI);
+      client = new MongoClient(ATLAS_URI, { serverSelectionTimeoutMS: 5000 });
       await client.connect();
       db = client.db(MONGODB_DB);
       console.log('✅ Connected to MongoDB Atlas');
-      return;
+      return true;
     } catch (atlasError) {
       console.log('❌ MongoDB Atlas connection failed:', atlasError.message);
     }
@@ -31,21 +60,26 @@ async function connectToMongoDB() {
   // Fallback to local MongoDB
   try {
     console.log('Attempting to connect to local MongoDB...');
-    client = new MongoClient(LOCAL_URI);
+    client = new MongoClient(LOCAL_URI, { serverSelectionTimeoutMS: 5000 });
     await client.connect();
     db = client.db(MONGODB_DB);
     console.log('✅ Connected to local MongoDB');
+    return true;
   } catch (localError) {
-    console.error('❌ Local MongoDB connection failed:', localError.message);
-    throw new Error('Could not connect to any MongoDB instance');
+    console.log('❌ Local MongoDB connection failed:', localError.message);
   }
+
+  // Fallback to JSON file storage
+  console.log('📄 Using JSON file storage (development mode)');
+  useJsonStorage = true;
+  loadReviewsFromFile();
+  return true;
 }
 
 async function startServer() {
   try {
     await connectToMongoDB();
-    const reviewsCollection = db.collection('reviews');
-
+    
     app.use(express.json());
     app.use(express.static(__dirname));
 
@@ -56,8 +90,16 @@ async function startServer() {
 
     app.get('/api/reviews', async (req, res) => {
       try {
-        const reviews = await reviewsCollection.find().sort({ date: -1 }).toArray();
-        res.json(reviews);
+        let result = [];
+        
+        if (useJsonStorage) {
+          result = reviews.sort((a, b) => new Date(b.date) - new Date(a.date));
+        } else {
+          const reviewsCollection = db.collection('reviews');
+          result = await reviewsCollection.find().sort({ date: -1 }).toArray();
+        }
+        
+        res.json(result);
       } catch (error) {
         console.error('Error fetching reviews:', error);
         res.status(500).json({ error: 'Failed to fetch reviews' });
@@ -82,11 +124,18 @@ async function startServer() {
           name: name.trim(),
           rating: ratingNum,
           review: review.trim(),
-          date: new Date(),
+          date: new Date().toISOString(),
         };
 
-        const result = await reviewsCollection.insertOne(newReview);
-        res.status(201).json({ ...newReview, _id: result.insertedId });
+        if (useJsonStorage) {
+          reviews.push(newReview);
+          saveReviewsToFile();
+          res.status(201).json(newReview);
+        } else {
+          const reviewsCollection = db.collection('reviews');
+          const result = await reviewsCollection.insertOne(newReview);
+          res.status(201).json({ ...newReview, _id: result.insertedId });
+        }
       } catch (error) {
         console.error('Error saving review:', error);
         res.status(500).json({ error: 'Failed to save review' });
@@ -94,8 +143,9 @@ async function startServer() {
     });
 
     const server = app.listen(PORT, () => {
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
-      console.log(`📊 Database: ${MONGODB_DB}`);
+      const dbType = useJsonStorage ? 'JSON File (Development)' : 'MongoDB';
+      console.log(`\n🚀 Server running on http://localhost:${PORT}`);
+      console.log(`📊 Database: ${dbType}\n`);
     });
 
     // Graceful shutdown
@@ -103,7 +153,7 @@ async function startServer() {
       console.log('\nShutting down gracefully...');
       server.close(async () => {
         if (client) await client.close();
-        console.log('MongoDB connection closed');
+        console.log('Connection closed');
         process.exit(0);
       });
     });
