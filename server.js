@@ -1,54 +1,38 @@
 require('dotenv').config();
 const express = require('express');
-const mysql = require('mysql2/promise');
+const { MongoClient } = require('mongodb');
 const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const MONGODB_URI = process.env.MONGODB_URI;
+const MONGODB_DB = process.env.MONGODB_DB || 'morsecode';
 
-// MySQL connection configuration
-const DB_CONFIG = {
-  host: process.env.MYSQL_HOST || 'localhost',
-  user: process.env.MYSQL_USER || 'root',
-  password: process.env.MYSQL_PASSWORD || '',
-  database: process.env.MYSQL_DATABASE || 'morse_reviews',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-};
+let client;
+let db;
 
-let pool;
-
-// Initialize MySQL database
-async function initDatabase() {
+// Initialize MongoDB connection
+async function connectToMongoDB() {
   try {
-    pool = mysql.createPool(DB_CONFIG);
-    const connection = await pool.getConnection();
+    if (!MONGODB_URI) {
+      throw new Error('MONGODB_URI not found in environment variables');
+    }
     
-    console.log('✅ Connected to MySQL database');
-    
-    // Create reviews table if it doesn't exist
-    await connection.query(
-      `CREATE TABLE IF NOT EXISTS reviews (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        rating INT NOT NULL,
-        review LONGTEXT NOT NULL,
-        date DATETIME NOT NULL
-      )`
-    );
-    
-    console.log('✅ Reviews table ready');
-    connection.release();
+    console.log('Attempting to connect to MongoDB Atlas...');
+    client = new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 5000 });
+    await client.connect();
+    db = client.db(MONGODB_DB);
+    console.log('✅ Connected to MongoDB Atlas');
+    return true;
   } catch (error) {
-    console.error('❌ Failed to initialize database:', error.message);
+    console.error('❌ MongoDB connection failed:', error.message);
     throw error;
   }
 }
 
 async function startServer() {
   try {
-    await initDatabase();
+    await connectToMongoDB();
     
     app.use(express.json());
     app.use(express.static(__dirname));
@@ -60,10 +44,9 @@ async function startServer() {
 
     app.get('/api/reviews', async (req, res) => {
       try {
-        const connection = await pool.getConnection();
-        const [rows] = await connection.query('SELECT * FROM reviews ORDER BY date DESC');
-        connection.release();
-        res.json(rows || []);
+        const reviewsCollection = db.collection('reviews');
+        const result = await reviewsCollection.find().sort({ date: -1 }).toArray();
+        res.json(result);
       } catch (error) {
         console.error('Error fetching reviews:', error);
         res.status(500).json({ error: 'Failed to fetch reviews' });
@@ -91,14 +74,9 @@ async function startServer() {
           date: new Date().toISOString(),
         };
 
-        const connection = await pool.getConnection();
-        const [result] = await connection.query(
-          'INSERT INTO reviews (name, rating, review, date) VALUES (?, ?, ?, ?)',
-          [newReview.name, newReview.rating, newReview.review, newReview.date]
-        );
-        connection.release();
-        
-        res.status(201).json({ ...newReview, id: result.insertId });
+        const reviewsCollection = db.collection('reviews');
+        const result = await reviewsCollection.insertOne(newReview);
+        res.status(201).json({ ...newReview, _id: result.insertedId });
       } catch (error) {
         console.error('Error saving review:', error);
         res.status(500).json({ error: 'Failed to save review' });
@@ -107,15 +85,15 @@ async function startServer() {
 
     const server = app.listen(PORT, () => {
       console.log(`\n🚀 Server running on http://localhost:${PORT}`);
-      console.log(`📊 Database: MySQL (${DB_CONFIG.host}:${DB_CONFIG.database})\n`);
+      console.log(`📊 Database: MongoDB (${MONGODB_DB})\n`);
     });
 
     // Graceful shutdown
     process.on('SIGINT', async () => {
       console.log('\nShutting down gracefully...');
       server.close(async () => {
-        if (pool) await pool.end();
-        console.log('Database connection closed');
+        if (client) await client.close();
+        console.log('Connection closed');
         process.exit(0);
       });
     });
