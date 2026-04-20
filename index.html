@@ -1089,31 +1089,36 @@
             if (!pendingReviews) return;
 
             const pending = JSON.parse(pendingReviews);
-            const synced = [];
+            const remaining = [];
 
             for (const review of pending) {
                 try {
                     const response = await fetch(reviewApiUrl, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(review)
+                        body: JSON.stringify({ name: review.name, rating: review.rating, review: review.review })
                     });
-                    if (response.ok) {
-                        synced.push(review);
+                    if (!response.ok) {
+                        // If sync failed, keep it in the queue
+                        remaining.push(review);
                     }
+                    // If response.ok, don't add back to remaining (it's synced!)
                 } catch (error) {
                     console.log('Sync attempt failed:', error);
+                    // On network error, keep in queue
+                    remaining.push(review);
                 }
             }
 
-            // Remove synced reviews from pending queue
-            if (synced.length > 0) {
-                const remaining = pending.filter(p => !synced.includes(p));
-                if (remaining.length > 0) {
-                    localStorage.setItem('morsePendingReviews', JSON.stringify(remaining));
-                } else {
-                    localStorage.removeItem('morsePendingReviews');
-                }
+            // Update localStorage with only remaining (unsynced) reviews
+            if (remaining.length > 0) {
+                localStorage.setItem('morsePendingReviews', JSON.stringify(remaining));
+            } else {
+                localStorage.removeItem('morsePendingReviews');
+            }
+            
+            if (remaining.length < pending.length) {
+                console.log(`Synced ${pending.length - remaining.length} review(s)`);
                 loadReviews();
             }
         }
