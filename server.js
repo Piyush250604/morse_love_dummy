@@ -1,46 +1,49 @@
 require('dotenv').config();
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
+const mysql = require('mysql2/promise');
 const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DB_FILE = path.join(__dirname, 'reviews.db');
 
-let db;
+// MySQL connection configuration
+const DB_CONFIG = {
+  host: process.env.MYSQL_HOST || 'localhost',
+  user: process.env.MYSQL_USER || 'root',
+  password: process.env.MYSQL_PASSWORD || '',
+  database: process.env.MYSQL_DATABASE || 'morse_reviews',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+};
 
-// Initialize SQLite database
-function initDatabase() {
-  return new Promise((resolve, reject) => {
-    db = new sqlite3.Database(DB_FILE, (err) => {
-      if (err) {
-        console.error('❌ Failed to open database:', err.message);
-        reject(err);
-      } else {
-        console.log('✅ Connected to SQLite database');
-        
-        // Create reviews table if it doesn't exist
-        db.run(
-          `CREATE TABLE IF NOT EXISTS reviews (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            rating INTEGER NOT NULL,
-            review TEXT NOT NULL,
-            date TEXT NOT NULL
-          )`,
-          (err) => {
-            if (err) {
-              console.error('❌ Failed to create table:', err.message);
-              reject(err);
-            } else {
-              console.log('✅ Reviews table ready');
-              resolve();
-            }
-          }
-        );
-      }
-    });
-  });
+let pool;
+
+// Initialize MySQL database
+async function initDatabase() {
+  try {
+    pool = mysql.createPool(DB_CONFIG);
+    const connection = await pool.getConnection();
+    
+    console.log('✅ Connected to MySQL database');
+    
+    // Create reviews table if it doesn't exist
+    await connection.query(
+      `CREATE TABLE IF NOT EXISTS reviews (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        rating INT NOT NULL,
+        review LONGTEXT NOT NULL,
+        date DATETIME NOT NULL
+      )`
+    );
+    
+    console.log('✅ Reviews table ready');
+    connection.release();
+  } catch (error) {
+    console.error('❌ Failed to initialize database:', error.message);
+    throw error;
+  }
 }
 
 async function startServer() {
@@ -55,17 +58,19 @@ async function startServer() {
       res.status(200).end();
     });
 
-    app.get('/api/reviews', (req, res) => {
-      db.all('SELECT * FROM reviews ORDER BY date DESC', (err, rows) => {
-        if (err) {
-          console.error('Error fetching reviews:', err);
-          return res.status(500).json({ error: 'Failed to fetch reviews' });
-        }
+    app.get('/api/reviews', async (req, res) => {
+      try {
+        const connection = await pool.getConnection();
+        const [rows] = await connection.query('SELECT * FROM reviews ORDER BY date DESC');
+        connection.release();
         res.json(rows || []);
-      });
+      } catch (error) {
+        console.error('Error fetching reviews:', error);
+        res.status(500).json({ error: 'Failed to fetch reviews' });
+      }
     });
 
-    app.post('/api/reviews', (req, res) => {
+    app.post('/api/reviews', async (req, res) => {
       try {
         const { name, rating, review } = req.body;
 
@@ -86,17 +91,14 @@ async function startServer() {
           date: new Date().toISOString(),
         };
 
-        db.run(
+        const connection = await pool.getConnection();
+        const [result] = await connection.query(
           'INSERT INTO reviews (name, rating, review, date) VALUES (?, ?, ?, ?)',
-          [newReview.name, newReview.rating, newReview.review, newReview.date],
-          function (err) {
-            if (err) {
-              console.error('Error saving review:', err);
-              return res.status(500).json({ error: 'Failed to save review' });
-            }
-            res.status(201).json({ ...newReview, id: this.lastID });
-          }
+          [newReview.name, newReview.rating, newReview.review, newReview.date]
         );
+        connection.release();
+        
+        res.status(201).json({ ...newReview, id: result.insertId });
       } catch (error) {
         console.error('Error saving review:', error);
         res.status(500).json({ error: 'Failed to save review' });
@@ -105,18 +107,16 @@ async function startServer() {
 
     const server = app.listen(PORT, () => {
       console.log(`\n🚀 Server running on http://localhost:${PORT}`);
-      console.log(`📊 Database: SQLite (${DB_FILE})\n`);
+      console.log(`📊 Database: MySQL (${DB_CONFIG.host}:${DB_CONFIG.database})\n`);
     });
 
     // Graceful shutdown
-    process.on('SIGINT', () => {
+    process.on('SIGINT', async () => {
       console.log('\nShutting down gracefully...');
-      server.close(() => {
-        db.close((err) => {
-          if (err) console.error(err);
-          console.log('Database connection closed');
-          process.exit(0);
-        });
+      server.close(async () => {
+        if (pool) await pool.end();
+        console.log('Database connection closed');
+        process.exit(0);
       });
     });
 
