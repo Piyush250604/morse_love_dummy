@@ -1071,82 +1071,22 @@
         });
 
         const reviewApiUrl = '/api/reviews';
-        let isServerOnline = true;
-
-        // Check server connectivity
-        async function checkServerAvailability() {
-            try {
-                const response = await fetch(reviewApiUrl, { method: 'HEAD', cache: 'no-store' });
-                return response.ok;
-            } catch (error) {
-                return false;
-            }
-        }
-
-        // Sync pending offline reviews to server
-        async function syncPendingReviews() {
-            const pendingReviews = localStorage.getItem('morsePendingReviews');
-            if (!pendingReviews) return;
-
-            const pending = JSON.parse(pendingReviews);
-            const remaining = [];
-
-            for (const review of pending) {
-                try {
-                    const response = await fetch(reviewApiUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name: review.name, rating: review.rating, review: review.review })
-                    });
-                    if (!response.ok) {
-                        // If sync failed, keep it in the queue
-                        remaining.push(review);
-                    }
-                    // If response.ok, don't add back to remaining (it's synced!)
-                } catch (error) {
-                    console.log('Sync attempt failed:', error);
-                    // On network error, keep in queue
-                    remaining.push(review);
-                }
-            }
-
-            // Update localStorage with only remaining (unsynced) reviews
-            if (remaining.length > 0) {
-                localStorage.setItem('morsePendingReviews', JSON.stringify(remaining));
-            } else {
-                localStorage.removeItem('morsePendingReviews');
-            }
-            
-            if (remaining.length < pending.length) {
-                console.log(`Synced ${pending.length - remaining.length} review(s)`);
-                loadReviews();
-            }
-        }
 
         async function loadReviews() {
             const reviewList = document.getElementById('reviewList');
             const reviewCount = document.getElementById('reviewCount');
             const averageRating = document.getElementById('averageRating');
             let reviews = [];
-            let serverReviews = [];
 
-            // Try to fetch from server
+            // Fetch reviews from MongoDB
             try {
                 const response = await fetch(reviewApiUrl);
                 if (response.ok) {
-                    serverReviews = await response.json();
-                    isServerOnline = true;
+                    reviews = await response.json();
                 }
             } catch (error) {
-                isServerOnline = false;
+                console.error('Error fetching reviews:', error);
             }
-
-            // Get pending offline reviews
-            const pendingReviews = localStorage.getItem('morsePendingReviews');
-            const pending = pendingReviews ? JSON.parse(pendingReviews) : [];
-
-            // Combine server reviews with pending (pending appear first)
-            reviews = [...pending, ...serverReviews];
 
             if (!reviews.length) {
                 reviewList.innerHTML = `
@@ -1160,15 +1100,18 @@
                 return;
             }
 
+            // Count pending reviews
+            const pendingReviews = reviews.filter(r => r.status === 'pending');
+            const approvedReviews = reviews.filter(r => r.status !== 'pending');
+
             reviewList.innerHTML = reviews.map(review => {
                 const stars = '★'.repeat(review.rating) + '☆'.repeat(5 - review.rating);
                 const date = new Date(review.date).toLocaleDateString('en-IN', {
                     year: 'numeric', month: 'short', day: 'numeric'
                 });
-                const isPending = review.synced === false || review.status === 'pending';
-                const pendingReasonText = review.synced === false ? 'Offline' : 'Pending Approval';
-                const statusBadge = isPending ? `<span style="color: #ff9800; font-size: 0.85em; margin-left: 8px;">⏳ ${pendingReasonText}</span>` : '';
-                const pendingMessage = isPending ? '<p style="color: #ff9800; font-size: 0.9em; margin-top: 8px;"><i class="fas fa-clock"></i> This review is still pending approval.</p>' : '';
+                const isPending = review.status === 'pending';
+                const statusBadge = isPending ? `<span style="color: #ff9800; font-size: 0.85em; margin-left: 8px;">⏳ Pending Approval</span>` : '';
+                const pendingMessage = isPending ? '<p style="color: #ff9800; font-size: 0.9em; margin-top: 8px;"><i class="fas fa-clock"></i> This review is awaiting admin approval.</p>' : '';
                 return `
                     <div class="review-card" style="${isPending ? 'opacity: 0.85; border-left: 4px solid #ff9800;' : ''}">
                         <div class="rating">${stars} ${review.rating}/5${statusBadge}</div>
@@ -1180,9 +1123,8 @@
                 `;
             }).join('');
 
-            const serverCount = serverReviews.length;
-            const pendingCount = pending.length;
             const totalCount = reviews.length;
+            const pendingCount = pendingReviews.length;
 
             reviewCount.textContent = `${totalCount} review${totalCount > 1 ? 's' : ''}${pendingCount > 0 ? ` (${pendingCount} pending)` : ''}`;
             
@@ -1190,6 +1132,7 @@
             const avg = allRatings.length > 0 ? (allRatings.reduce((sum, item) => sum + item, 0) / allRatings.length).toFixed(1) : 0;
             averageRating.textContent = `Average ${avg}/5`;
         }
+
 
         async function submitReview(event) {
             event.preventDefault();
@@ -1212,53 +1155,35 @@
             spinner.style.display = 'inline-block';
             submitText.textContent = 'Sending...';
 
-            const review = {
-                name,
-                rating: Number(rating),
-                review: reviewText,
-                date: new Date().toISOString(),
-                status: 'pending',
-                synced: false
-            };
-
-            let savedOffline = false;
-
             try {
                 const response = await fetch(reviewApiUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(review)
+                    body: JSON.stringify({ 
+                        name, 
+                        rating: Number(rating), 
+                        review: reviewText 
+                    })
                 });
+                
                 if (response.ok) {
-                    review.synced = true;
+                    reviewMessage.textContent = '✅ Thank you! Your review has been submitted and is pending approval.';
+                    reviewMessage.className = 'review-notice';
+                    document.getElementById('reviewForm').reset();
+                    loadReviews();
                 } else {
                     throw new Error('Server error');
                 }
             } catch (error) {
-                savedOffline = true;
+                console.error('Error saving review:', error);
+                reviewMessage.textContent = '❌ Failed to submit review. Please try again.';
+                reviewMessage.className = 'review-error';
+            } finally {
+                submitBtn.disabled = false;
+                spinner.style.display = 'none';
+                submitText.textContent = 'Submit Review';
+                reviewMessage.style.display = 'block';
             }
-
-            // Store review (synced or pending)
-            if (!savedOffline) {
-                // Successfully sent to server, no need to store
-            } else {
-                // Save to pending queue
-                const pending = JSON.parse(localStorage.getItem('morsePendingReviews') || '[]');
-                pending.unshift(review);
-                localStorage.setItem('morsePendingReviews', JSON.stringify(pending));
-            }
-
-            submitBtn.disabled = false;
-            spinner.style.display = 'none';
-            submitText.textContent = 'Submit Review';
-            document.getElementById('reviewForm').reset();
-            loadReviews();
-
-            reviewMessage.textContent = savedOffline
-                ? '📱 Saved locally - will sync when server is available.'
-                : '✅ Thank you! Your review has been submitted.';
-            reviewMessage.className = 'review-notice';
-            reviewMessage.style.display = 'block';
         }
 
         document.getElementById('reviewForm').addEventListener('submit', submitReview);
@@ -1267,24 +1192,6 @@
         document.addEventListener('DOMContentLoaded', () => {
             updatePreview();
             loadReviews();
-
-            // Check server every 10 seconds and sync if available
-            setInterval(async () => {
-                if (!isServerOnline) {
-                    const online = await checkServerAvailability();
-                    if (online) {
-                        isServerOnline = true;
-                        console.log('Server is back online, syncing...');
-                        await syncPendingReviews();
-                    }
-                } else {
-                    // If server was online, still check for pending reviews periodically
-                    const pending = localStorage.getItem('morsePendingReviews');
-                    if (pending) {
-                        await syncPendingReviews();
-                    }
-                }
-            }, 10000);
         });
 
         // Character counter live update
