@@ -1165,13 +1165,16 @@
                 const date = new Date(review.date).toLocaleDateString('en-IN', {
                     year: 'numeric', month: 'short', day: 'numeric'
                 });
-                const isPending = review.synced === false;
-                const statusBadge = isPending ? '<span style="color: #ff9800; font-size: 0.85em; margin-left: 8px;">⏳ Pending</span>' : '';
+                const isPending = review.synced === false || review.status === 'pending';
+                const pendingReasonText = review.synced === false ? 'Offline' : 'Pending Approval';
+                const statusBadge = isPending ? `<span style="color: #ff9800; font-size: 0.85em; margin-left: 8px;">⏳ ${pendingReasonText}</span>` : '';
+                const pendingMessage = isPending ? '<p style="color: #ff9800; font-size: 0.9em; margin-top: 8px;"><i class="fas fa-clock"></i> This review is still pending approval.</p>' : '';
                 return `
                     <div class="review-card" style="${isPending ? 'opacity: 0.85; border-left: 4px solid #ff9800;' : ''}">
                         <div class="rating">${stars} ${review.rating}/5${statusBadge}</div>
                         <h4>${review.name}</h4>
                         <p>${review.review}</p>
+                        ${pendingMessage}
                         <small style="color: #888; display: block; margin-top: 12px;">${date}</small>
                     </div>
                 `;
@@ -1214,6 +1217,7 @@
                 rating: Number(rating),
                 review: reviewText,
                 date: new Date().toISOString(),
+                status: 'pending',
                 synced: false
             };
 

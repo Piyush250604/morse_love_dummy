@@ -72,6 +72,7 @@ async function startServer() {
           rating: ratingNum,
           review: review.trim(),
           date: new Date().toISOString(),
+          status: 'pending',
         };
 
         const reviewsCollection = db.collection('reviews');
