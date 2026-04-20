@@ -1,84 +1,51 @@
 require('dotenv').config();
 const express = require('express');
-const { MongoClient } = require('mongodb');
-const fs = require('fs');
+const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const DB_FILE = path.join(__dirname, 'reviews.db');
 
-// Try Atlas first, fallback to local MongoDB, then use JSON file storage
-const ATLAS_URI = process.env.MONGODB_URI;
-const LOCAL_URI = 'mongodb://127.0.0.1:27017';
-const MONGODB_DB = process.env.MONGODB_DB || 'morsecode';
-const JSON_DB_FILE = path.join(__dirname, 'reviews.json');
-
-let client;
 let db;
-let useJsonStorage = false;
-let reviews = [];
 
-// Load reviews from JSON file
-function loadReviewsFromFile() {
-  try {
-    if (fs.existsSync(JSON_DB_FILE)) {
-      const data = fs.readFileSync(JSON_DB_FILE, 'utf8');
-      reviews = JSON.parse(data);
-    } else {
-      reviews = [];
-    }
-  } catch (error) {
-    console.log('Error loading reviews from file:', error.message);
-    reviews = [];
-  }
-}
-
-// Save reviews to JSON file
-function saveReviewsToFile() {
-  try {
-    fs.writeFileSync(JSON_DB_FILE, JSON.stringify(reviews, null, 2), 'utf8');
-  } catch (error) {
-    console.error('Error saving reviews to file:', error);
-  }
-}
-
-async function connectToMongoDB() {
-  // Try Atlas first
-  if (ATLAS_URI) {
-    try {
-      console.log('Attempting to connect to MongoDB Atlas...');
-      client = new MongoClient(ATLAS_URI, { serverSelectionTimeoutMS: 5000 });
-      await client.connect();
-      db = client.db(MONGODB_DB);
-      console.log('✅ Connected to MongoDB Atlas');
-      return true;
-    } catch (atlasError) {
-      console.log('❌ MongoDB Atlas connection failed:', atlasError.message);
-    }
-  }
-
-  // Fallback to local MongoDB
-  try {
-    console.log('Attempting to connect to local MongoDB...');
-    client = new MongoClient(LOCAL_URI, { serverSelectionTimeoutMS: 5000 });
-    await client.connect();
-    db = client.db(MONGODB_DB);
-    console.log('✅ Connected to local MongoDB');
-    return true;
-  } catch (localError) {
-    console.log('❌ Local MongoDB connection failed:', localError.message);
-  }
-
-  // Fallback to JSON file storage
-  console.log('📄 Using JSON file storage (development mode)');
-  useJsonStorage = true;
-  loadReviewsFromFile();
-  return true;
+// Initialize SQLite database
+function initDatabase() {
+  return new Promise((resolve, reject) => {
+    db = new sqlite3.Database(DB_FILE, (err) => {
+      if (err) {
+        console.error('❌ Failed to open database:', err.message);
+        reject(err);
+      } else {
+        console.log('✅ Connected to SQLite database');
+        
+        // Create reviews table if it doesn't exist
+        db.run(
+          `CREATE TABLE IF NOT EXISTS reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            rating INTEGER NOT NULL,
+            review TEXT NOT NULL,
+            date TEXT NOT NULL
+          )`,
+          (err) => {
+            if (err) {
+              console.error('❌ Failed to create table:', err.message);
+              reject(err);
+            } else {
+              console.log('✅ Reviews table ready');
+              resolve();
+            }
+          }
+        );
+      }
+    });
+  });
 }
 
 async function startServer() {
   try {
-    await connectToMongoDB();
+    await initDatabase();
     
     app.use(express.json());
     app.use(express.static(__dirname));
@@ -88,25 +55,17 @@ async function startServer() {
       res.status(200).end();
     });
 
-    app.get('/api/reviews', async (req, res) => {
-      try {
-        let result = [];
-        
-        if (useJsonStorage) {
-          result = reviews.sort((a, b) => new Date(b.date) - new Date(a.date));
-        } else {
-          const reviewsCollection = db.collection('reviews');
-          result = await reviewsCollection.find().sort({ date: -1 }).toArray();
+    app.get('/api/reviews', (req, res) => {
+      db.all('SELECT * FROM reviews ORDER BY date DESC', (err, rows) => {
+        if (err) {
+          console.error('Error fetching reviews:', err);
+          return res.status(500).json({ error: 'Failed to fetch reviews' });
         }
-        
-        res.json(result);
-      } catch (error) {
-        console.error('Error fetching reviews:', error);
-        res.status(500).json({ error: 'Failed to fetch reviews' });
-      }
+        res.json(rows || []);
+      });
     });
 
-    app.post('/api/reviews', async (req, res) => {
+    app.post('/api/reviews', (req, res) => {
       try {
         const { name, rating, review } = req.body;
 
@@ -127,15 +86,17 @@ async function startServer() {
           date: new Date().toISOString(),
         };
 
-        if (useJsonStorage) {
-          reviews.push(newReview);
-          saveReviewsToFile();
-          res.status(201).json(newReview);
-        } else {
-          const reviewsCollection = db.collection('reviews');
-          const result = await reviewsCollection.insertOne(newReview);
-          res.status(201).json({ ...newReview, _id: result.insertedId });
-        }
+        db.run(
+          'INSERT INTO reviews (name, rating, review, date) VALUES (?, ?, ?, ?)',
+          [newReview.name, newReview.rating, newReview.review, newReview.date],
+          function (err) {
+            if (err) {
+              console.error('Error saving review:', err);
+              return res.status(500).json({ error: 'Failed to save review' });
+            }
+            res.status(201).json({ ...newReview, id: this.lastID });
+          }
+        );
       } catch (error) {
         console.error('Error saving review:', error);
         res.status(500).json({ error: 'Failed to save review' });
@@ -143,18 +104,19 @@ async function startServer() {
     });
 
     const server = app.listen(PORT, () => {
-      const dbType = useJsonStorage ? 'JSON File (Development)' : 'MongoDB';
       console.log(`\n🚀 Server running on http://localhost:${PORT}`);
-      console.log(`📊 Database: ${dbType}\n`);
+      console.log(`📊 Database: SQLite (${DB_FILE})\n`);
     });
 
     // Graceful shutdown
-    process.on('SIGINT', async () => {
+    process.on('SIGINT', () => {
       console.log('\nShutting down gracefully...');
-      server.close(async () => {
-        if (client) await client.close();
-        console.log('Connection closed');
-        process.exit(0);
+      server.close(() => {
+        db.close((err) => {
+          if (err) console.error(err);
+          console.log('Database connection closed');
+          process.exit(0);
+        });
       });
     });
 
