@@ -1071,21 +1071,77 @@
         });
 
         const reviewApiUrl = '/api/reviews';
+        let isServerOnline = true;
+
+        // Check server connectivity
+        async function checkServerAvailability() {
+            try {
+                const response = await fetch(reviewApiUrl, { method: 'HEAD', cache: 'no-store' });
+                return response.ok;
+            } catch (error) {
+                return false;
+            }
+        }
+
+        // Sync pending offline reviews to server
+        async function syncPendingReviews() {
+            const pendingReviews = localStorage.getItem('morsePendingReviews');
+            if (!pendingReviews) return;
+
+            const pending = JSON.parse(pendingReviews);
+            const synced = [];
+
+            for (const review of pending) {
+                try {
+                    const response = await fetch(reviewApiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(review)
+                    });
+                    if (response.ok) {
+                        synced.push(review);
+                    }
+                } catch (error) {
+                    console.log('Sync attempt failed:', error);
+                }
+            }
+
+            // Remove synced reviews from pending queue
+            if (synced.length > 0) {
+                const remaining = pending.filter(p => !synced.includes(p));
+                if (remaining.length > 0) {
+                    localStorage.setItem('morsePendingReviews', JSON.stringify(remaining));
+                } else {
+                    localStorage.removeItem('morsePendingReviews');
+                }
+                loadReviews();
+            }
+        }
 
         async function loadReviews() {
             const reviewList = document.getElementById('reviewList');
             const reviewCount = document.getElementById('reviewCount');
             const averageRating = document.getElementById('averageRating');
             let reviews = [];
+            let serverReviews = [];
 
+            // Try to fetch from server
             try {
                 const response = await fetch(reviewApiUrl);
-                if (!response.ok) throw new Error('Review API unavailable');
-                reviews = await response.json();
+                if (response.ok) {
+                    serverReviews = await response.json();
+                    isServerOnline = true;
+                }
             } catch (error) {
-                const stored = localStorage.getItem('morseReviews');
-                reviews = stored ? JSON.parse(stored) : [];
+                isServerOnline = false;
             }
+
+            // Get pending offline reviews
+            const pendingReviews = localStorage.getItem('morsePendingReviews');
+            const pending = pendingReviews ? JSON.parse(pendingReviews) : [];
+
+            // Combine server reviews with pending (pending appear first)
+            reviews = [...pending, ...serverReviews];
 
             if (!reviews.length) {
                 reviewList.innerHTML = `
@@ -1104,9 +1160,11 @@
                 const date = new Date(review.date).toLocaleDateString('en-IN', {
                     year: 'numeric', month: 'short', day: 'numeric'
                 });
+                const isPending = review.synced === false;
+                const statusBadge = isPending ? '<span style="color: #ff9800; font-size: 0.85em; margin-left: 8px;">⏳ Pending</span>' : '';
                 return `
-                    <div class="review-card">
-                        <div class="rating">${stars} ${review.rating}/5</div>
+                    <div class="review-card" style="${isPending ? 'opacity: 0.85; border-left: 4px solid #ff9800;' : ''}">
+                        <div class="rating">${stars} ${review.rating}/5${statusBadge}</div>
                         <h4>${review.name}</h4>
                         <p>${review.review}</p>
                         <small style="color: #888; display: block; margin-top: 12px;">${date}</small>
@@ -1114,8 +1172,14 @@
                 `;
             }).join('');
 
-            reviewCount.textContent = `${reviews.length} review${reviews.length > 1 ? 's' : ''}`;
-            const avg = (reviews.reduce((sum, item) => sum + Number(item.rating), 0) / reviews.length).toFixed(1);
+            const serverCount = serverReviews.length;
+            const pendingCount = pending.length;
+            const totalCount = reviews.length;
+
+            reviewCount.textContent = `${totalCount} review${totalCount > 1 ? 's' : ''}${pendingCount > 0 ? ` (${pendingCount} pending)` : ''}`;
+            
+            const allRatings = reviews.filter(r => r.rating).map(r => Number(r.rating));
+            const avg = allRatings.length > 0 ? (allRatings.reduce((sum, item) => sum + item, 0) / allRatings.length).toFixed(1) : 0;
             averageRating.textContent = `Average ${avg}/5`;
         }
 
@@ -1140,22 +1204,39 @@
             spinner.style.display = 'inline-block';
             submitText.textContent = 'Sending...';
 
-            const payload = { name, rating, review: reviewText };
+            const review = {
+                name,
+                rating: Number(rating),
+                review: reviewText,
+                date: new Date().toISOString(),
+                synced: false
+            };
+
             let savedOffline = false;
 
             try {
                 const response = await fetch(reviewApiUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
+                    body: JSON.stringify(review)
                 });
-                if (!response.ok) throw new Error('Save failed');
+                if (response.ok) {
+                    review.synced = true;
+                } else {
+                    throw new Error('Server error');
+                }
             } catch (error) {
-                const stored = localStorage.getItem('morseReviews');
-                const reviews = stored ? JSON.parse(stored) : [];
-                reviews.unshift({ ...payload, date: new Date().toISOString() });
-                localStorage.setItem('morseReviews', JSON.stringify(reviews));
                 savedOffline = true;
+            }
+
+            // Store review (synced or pending)
+            if (!savedOffline) {
+                // Successfully sent to server, no need to store
+            } else {
+                // Save to pending queue
+                const pending = JSON.parse(localStorage.getItem('morsePendingReviews') || '[]');
+                pending.unshift(review);
+                localStorage.setItem('morsePendingReviews', JSON.stringify(pending));
             }
 
             submitBtn.disabled = false;
@@ -1165,8 +1246,8 @@
             loadReviews();
 
             reviewMessage.textContent = savedOffline
-                ? 'Review saved locally. It will appear immediately and sync when the server is available.'
-                : 'Thank you! Your review has been submitted.';
+                ? '📱 Saved locally - will sync when server is available.'
+                : '✅ Thank you! Your review has been submitted.';
             reviewMessage.className = 'review-notice';
             reviewMessage.style.display = 'block';
         }
@@ -1177,6 +1258,24 @@
         document.addEventListener('DOMContentLoaded', () => {
             updatePreview();
             loadReviews();
+
+            // Check server every 10 seconds and sync if available
+            setInterval(async () => {
+                if (!isServerOnline) {
+                    const online = await checkServerAvailability();
+                    if (online) {
+                        isServerOnline = true;
+                        console.log('Server is back online, syncing...');
+                        await syncPendingReviews();
+                    }
+                } else {
+                    // If server was online, still check for pending reviews periodically
+                    const pending = localStorage.getItem('morsePendingReviews');
+                    if (pending) {
+                        await syncPendingReviews();
+                    }
+                }
+            }, 10000);
         });
 
         // Character counter live update
