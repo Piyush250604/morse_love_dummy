@@ -4,17 +4,46 @@ const { MongoClient } = require('mongodb');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
+
+// Try Atlas first, fallback to local MongoDB
+const ATLAS_URI = process.env.MONGODB_URI;
+const LOCAL_URI = 'mongodb://127.0.0.1:27017';
 const MONGODB_DB = process.env.MONGODB_DB || 'morsecode';
 
-const client = new MongoClient(MONGODB_URI);
+let client;
+let db;
+
+async function connectToMongoDB() {
+  // Try Atlas first
+  if (ATLAS_URI) {
+    try {
+      console.log('Attempting to connect to MongoDB Atlas...');
+      client = new MongoClient(ATLAS_URI);
+      await client.connect();
+      db = client.db(MONGODB_DB);
+      console.log('✅ Connected to MongoDB Atlas');
+      return;
+    } catch (atlasError) {
+      console.log('❌ MongoDB Atlas connection failed:', atlasError.message);
+    }
+  }
+
+  // Fallback to local MongoDB
+  try {
+    console.log('Attempting to connect to local MongoDB...');
+    client = new MongoClient(LOCAL_URI);
+    await client.connect();
+    db = client.db(MONGODB_DB);
+    console.log('✅ Connected to local MongoDB');
+  } catch (localError) {
+    console.error('❌ Local MongoDB connection failed:', localError.message);
+    throw new Error('Could not connect to any MongoDB instance');
+  }
+}
 
 async function startServer() {
   try {
-    await client.connect();
-    console.log('Connected to MongoDB');
-
-    const db = client.db(MONGODB_DB);
+    await connectToMongoDB();
     const reviewsCollection = db.collection('reviews');
 
     app.use(express.json());
@@ -38,7 +67,7 @@ async function startServer() {
     app.post('/api/reviews', async (req, res) => {
       try {
         const { name, rating, review } = req.body;
-        
+
         // Validation
         if (!name || !rating || !review) {
           return res.status(400).json({ error: 'Please provide name, rating, and review.' });
@@ -65,21 +94,22 @@ async function startServer() {
     });
 
     const server = app.listen(PORT, () => {
-      console.log(`Server running on http://localhost:${PORT}`);
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
+      console.log(`📊 Database: ${MONGODB_DB}`);
     });
 
     // Graceful shutdown
     process.on('SIGINT', async () => {
       console.log('\nShutting down gracefully...');
       server.close(async () => {
-        await client.close();
+        if (client) await client.close();
         console.log('MongoDB connection closed');
         process.exit(0);
       });
     });
 
   } catch (error) {
-    console.error('Failed to start server:', error);
+    console.error('❌ Failed to start server:', error.message);
     process.exit(1);
   }
 }
