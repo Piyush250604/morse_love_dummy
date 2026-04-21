@@ -1167,15 +1167,23 @@
 
             try {
                 const reviewApiUrl = API_CONFIG.reviewApiUrl;
+                console.log('📤 Submitting review to:', reviewApiUrl);
+                const payloadData = { 
+                    name, 
+                    rating: Number(rating), 
+                    review: reviewText 
+                };
+                console.log('📦 Payload:', payloadData);
+                
                 const response = await fetch(reviewApiUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        name, 
-                        rating: Number(rating), 
-                        review: reviewText 
-                    })
+                    body: JSON.stringify(payloadData)
                 });
+                
+                console.log('📥 Response status:', response.status);
+                const responseData = await response.json();
+                console.log('📥 Response data:', responseData);
                 
                 if (response.ok) {
                     reviewMessage.textContent = '✅ Thank you! Your review has been submitted and is pending approval.';
@@ -1183,11 +1191,11 @@
                     document.getElementById('reviewForm').reset();
                     loadReviews();
                 } else {
-                    throw new Error('Server error');
+                    throw new Error(responseData.error || 'Server error');
                 }
             } catch (error) {
-                console.error('Error saving review:', error);
-                reviewMessage.textContent = '❌ Failed to submit review. Please try again.';
+                console.error('❌ Error saving review:', error);
+                reviewMessage.textContent = `❌ Failed to submit review: ${error.message}`;
                 reviewMessage.className = 'review-error';
             } finally {
                 submitBtn.disabled = false;
