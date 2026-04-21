@@ -974,6 +974,17 @@
     </footer>
 
     <script>
+        // ============================================
+        // API Configuration - Customize the endpoint
+        // ============================================
+        const API_CONFIG = {
+            // Set the review API endpoint
+            // Options:
+            // - 'http://localhost:3000/api/reviews' (local development)
+            // - 'https://your-deployed-api.com/api/reviews' (production)
+            reviewApiUrl: 'https://dummysite2004.netlify.app/api/reviews'
+        };
+
         // Morse Code Dictionary
         const morseCode = {
             'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.', 'F': '..-.',
@@ -1070,9 +1081,8 @@
             }
         });
 
-        const reviewApiUrl = 'https://dummysite2004.netlify.app/api/reviews';
-
         async function loadReviews() {
+            const reviewApiUrl = API_CONFIG.reviewApiUrl;
             const reviewList = document.getElementById('reviewList');
             const reviewCount = document.getElementById('reviewCount');
             const averageRating = document.getElementById('averageRating');
@@ -1156,6 +1166,7 @@
             submitText.textContent = 'Sending...';
 
             try {
+                const reviewApiUrl = API_CONFIG.reviewApiUrl;
                 const response = await fetch(reviewApiUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
